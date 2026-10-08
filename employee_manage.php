@@ -16,6 +16,7 @@ $history = $pdo->query("SELECT * FROM import_history WHERE import_type = 'EMPLOY
 </head>
 <body class="bg-light py-4">
 <div class="container">
+    <?php include 'header.php'; ?> <!-- 2. ดึง Header มาแสดง -->
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h3>จัดการข้อมูลบุคลากร (Employee Management)</h3>
         <a href="main.php" class="btn btn-secondary btn-sm"><i class="bi bi-house-door"></i> กลับหน้าหลัก</a>

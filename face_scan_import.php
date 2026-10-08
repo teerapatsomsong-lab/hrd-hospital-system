@@ -1,5 +1,5 @@
 <?php
-// face_scan_import.php - นำเข้าข้อมูลสแกนหน้าอิงตาม Column Index ป้องกันปัญหา Header
+// face_scan_import.php - นำเข้าข้อมูล Face Scan พร้อม Logic ตรวจสอบและอัปเดตการเปลี่ยนแปลง
 require_once 'auth_check.php';
 require_once 'config.php';
 checkRole(['Super Admin', 'HR Admin']);
@@ -9,45 +9,80 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['scan_file'])) {
     $file = $_FILES['scan_file'];
     if (($handle = fopen($file['tmp_name'], "r")) !== FALSE) {
         
-        // ข้ามบรรทัด Header (บรรทัดแรก)
-        fgetcsv($handle, 1000, ",");
+        fgetcsv($handle, 1000, ","); // ข้าม Header บรรทัดแรก
 
-        // ดึงรายชื่อพนักงานที่มีในระบบ
         $empStmt = $pdo->query("SELECT employee_id FROM employees");
         $validEmps = array_flip($empStmt->fetchAll(PDO::FETCH_COLUMN));
 
         $batchId = 'SCAN_' . date('Ymd_His');
-        $success = 0; $failed = 0; $errorLogs = []; $rowNum = 1;
+        $success = 0; $updated = 0; $failed = 0; $errorLogs = []; $rowNum = 1;
 
         $pdo->beginTransaction();
 
         while (($data = fgetcsv($handle, 1000, ",")) !== FALSE) {
             $rowNum++;
-            if (count($data) < 7) continue; // หากคอลัมน์ไม่ครบให้ข้าม
+            if (count($data) < 7) continue;
 
-            // ดึงข้อมูลตามลำดับ Index คอลัมน์จริงใน CSV พร้อมตัดช่องว่าง
             $empId     = trim($data[0] ?? '');
             $scanDate  = trim($data[3] ?? '');
             $firstScan = trim($data[5] ?? '');
             $lastScan  = trim($data[6] ?? '');
             $totalHrs  = trim($data[7] ?? '');
 
-            // เติมวินาที :00 หากข้อมูลมาเฉพาะ HH:MM
             if ($firstScan && strlen($firstScan) === 5) $firstScan .= ':00';
             if ($lastScan && strlen($lastScan) === 5) $lastScan .= ':00';
 
             try {
-                if (empty($empId)) throw new Exception("ไม่พบรหัสพนักงานในบรรทัดนี้");
-                if (!isset($validEmps[$empId])) throw new Exception("ไม่พบรหัสพนักงาน {$empId} ในระบบ HRD");
+                if (empty($empId)) throw new Exception("ไม่พบรหัสพนักงาน");
+                if (!isset($validEmps[$empId])) throw new Exception("ไม่พบรหัสพนักงาน {$empId} ในระบบ");
 
-                // Insert / Update ข้อมูลสแกนลง face_scan_logs
-                $ins = $pdo->prepare("INSERT INTO face_scan_logs (employee_id, scan_date, first_scan_time, last_scan_time, total_hours, import_batch_id) 
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON DUPLICATE KEY UPDATE 
-                    first_scan_time=VALUES(first_scan_time), last_scan_time=VALUES(last_scan_time), total_hours=VALUES(total_hours)");
-                
-                $ins->execute([$empId, $scanDate, $firstScan, $lastScan, $totalHrs, $batchId]);
-                $success++;
+                // 1. ตรวจสอบว่ามีข้อมูลของพนักงานคนนี้ในวันดังกล่าวแล้วหรือยัง
+                $chkStmt = $pdo->prepare("SELECT * FROM face_scan_logs WHERE employee_id = ? AND scan_date = ?");
+                $chkStmt->execute([$empId, $scanDate]);
+                $oldData = $chkStmt->fetch();
+
+                if (!$oldData) {
+                    // กรณีไม่มีข้อมูลเดิม -> บันทึกใหม่ (INSERT)
+                    $ins = $pdo->prepare("INSERT INTO face_scan_logs 
+                        (employee_id, scan_date, first_scan_time, last_scan_time, total_hours, import_batch_id) 
+                        VALUES (?, ?, ?, ?, ?, ?)");
+                    $ins->execute([$empId, $scanDate, $firstScan, $lastScan, $totalHrs, $batchId]);
+                    $success++;
+                } else {
+                    // กรณีมีข้อมูลเดิม -> เช็กว่าข้อมูลใหม่มีพัฒนาการ/การเปลี่ยนแปลงหรือไม่
+                    $needUpdate = false;
+                    
+                    $newFirst = $oldData['first_scan_time'];
+                    $newLast  = $oldData['last_scan_time'];
+                    $newHours = $oldData['total_hours'];
+
+                    // เช็กเวลาเข้า: ถ้าของเดิมไม่มี แต่ของใหม่มีเวลา
+                    if ((empty($oldData['first_scan_time']) || $oldData['first_scan_time'] === '00:00:00') && !empty($firstScan)) {
+                        $newFirst = $firstScan;
+                        $needUpdate = true;
+                    }
+
+                    // เช็กเวลาออก: ถ้าของใหม่มีเวลาสแกนออกสมบูรณ์กว่า
+                    if (!empty($lastScan) && $lastScan !== '00:00:00' && $lastScan !== $oldData['last_scan_time']) {
+                        $newLast = $lastScan;
+                        $needUpdate = true;
+                    }
+
+                    // เช็กชั่วโมงรวม: ถ้าของใหม่คำนวณได้ชั่วโมงการทำงานที่มากกว่าเดิม
+                    if (!empty($totalHrs) && $totalHrs !== '00:00' && $totalHrs !== $oldData['total_hours']) {
+                        $newHours = $totalHrs;
+                        $needUpdate = true;
+                    }
+
+                    // อัปเดตเฉพาะเมื่อมีการเปลี่ยนแปลงข้อมูลจริงเท่านั้น
+                    if ($needUpdate) {
+                        $upd = $pdo->prepare("UPDATE face_scan_logs 
+                            SET first_scan_time = ?, last_scan_time = ?, total_hours = ?, import_batch_id = ? 
+                            WHERE employee_id = ? AND scan_date = ?");
+                        $upd->execute([$newFirst, $newLast, $newHours, $batchId, $empId, $scanDate]);
+                        $updated++;
+                    }
+                }
 
             } catch (Exception $e) {
                 $failed++;
@@ -57,12 +92,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['scan_file'])) {
         fclose($handle);
 
         $hist = $pdo->prepare("INSERT INTO import_history (batch_id, import_type, file_name, total_records, success_count, failed_count, error_log, imported_by) VALUES (?, 'FACE_SCAN', ?, ?, ?, ?, ?, ?)");
-        $hist->execute([$batchId, $file['name'], ($success + $failed), $success, $failed, json_encode($errorLogs, JSON_UNESCAPED_UNICODE), $_SESSION['user_id']]);
+        $hist->execute([$batchId, $file['name'], ($success + $updated + $failed), ($success + $updated), $failed, json_encode($errorLogs, JSON_UNESCAPED_UNICODE), $_SESSION['user_id']]);
 
         $pdo->commit();
-        logAudit($pdo, $_SESSION['user_id'], 'IMPORT_FACE_SCAN', 'face_scan_logs', $batchId, ['success' => $success, 'failed' => $failed]);
-        
-        $msg = "นำเข้าไฟล์ CSV เรียบร้อยแล้ว! สำเร็จ $success รายการ (กรุณากดปุ่มประมวลผลเวลาต่อ)";
+        $msg = "ประมวลผลไฟล์ CSV เรียบร้อยแล้ว! (เพิ่มข้อมูลใหม่: $success รายการ, อัปเดตข้อมูลที่มีการเปลี่ยนแปลง: $updated รายการ)";
     }
 }
 ?>
@@ -76,6 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['scan_file'])) {
 </head>
 <body class="bg-light py-4">
 <div class="container">
+    <?php include 'header.php'; ?> <!-- 2. ดึง Header มาแสดง -->
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h3>นำเข้าเวลา Face Scan (Import Log)</h3>
         <div>

@@ -1,5 +1,5 @@
 <?php
-// employee_list.php - หน้าแสดง รายชื่อพนักงาน การ์ดรายละเอียด อัปโหลดรูป แก้ไขข้อมูล และกำหนดเวลาเข้างานรายบุคคล (แสดงหน้าละ 20 คน)
+// employee_list.php - รายชื่อบุคลากร (ฉบับสมบูรณ์: รูปโปรไฟล์, Pagination, Modal ละเอียด + work_mode)
 require_once 'auth_check.php';
 require_once 'config.php';
 
@@ -23,6 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
                         app_status = ?, 
                         work_start_time = ?, 
                         work_end_time = ?, 
+                        work_mode = ?, 
                         area = ? 
                       WHERE employee_id = ?";
                       
@@ -40,12 +41,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             $_POST['app_status'] ?? 'เปิดใช้งาน',
             $_POST['work_start_time'] ?? '08:00:00',
             $_POST['work_end_time'] ?? '16:00:00',
+            $_POST['work_mode'] ?? 'FIXED',
             $_POST['area'] ?? '',
             $empId
         ]);
 
         logAudit($pdo, $_SESSION['user_id'], 'UPDATE_EMPLOYEE', 'employees', $empId, $_POST);
-        echo "<script>alert('แก้ไขข้อมูลพนักงานและเวลาเข้างานสำเร็จ!'); window.location.href='employee_list.php';</script>";
+        echo "<script>alert('แก้ไขข้อมูลพนักงานสำเร็จ!'); window.location.href='employee_list.php';</script>";
         exit();
     }
 }
@@ -88,14 +90,15 @@ $deptStmt = $pdo->query("SELECT DISTINCT department FROM employees WHERE departm
 $departments = $deptStmt->fetchAll(PDO::FETCH_COLUMN);
 
 // รับค่าการค้นหาและ Filter
-$search = trim($_GET['search'] ?? '');
+$search     = trim($_GET['search'] ?? '');
 $filterDept = trim($_GET['department'] ?? '');
-$page = max(1, intval($_GET['page'] ?? 1));
-$limit = 20; // แสดงหน้าละ 20 คน
-$offset = ($page - 1) * $limit;
+$filterMode = trim($_GET['work_mode'] ?? '');
+$page       = max(1, intval($_GET['page'] ?? 1));
+$limit      = 20; // แสดงหน้าละ 20 คน
+$offset     = ($page - 1) * $limit;
 
 // เงื่อนไข Search
-$where = ["1=1"];
+$where  = ["1=1"];
 $params = [];
 
 if ($search !== '') {
@@ -109,13 +112,18 @@ if ($filterDept !== '') {
     $params[] = $filterDept;
 }
 
+if ($filterMode !== '') {
+    $where[] = "work_mode = ?";
+    $params[] = $filterMode;
+}
+
 $whereClause = implode(" AND ", $where);
 
 // นับจำนวนทั้งหมด
 $countStmt = $pdo->prepare("SELECT COUNT(*) FROM employees WHERE {$whereClause}");
 $countStmt->execute($params);
 $totalRecords = $countStmt->fetchColumn();
-$totalPages = ceil($totalRecords / $limit);
+$totalPages   = ceil($totalRecords / $limit);
 
 // ดึงข้อมูลพนักงาน
 $sql = "SELECT * FROM employees WHERE {$whereClause} ORDER BY id DESC LIMIT {$limit} OFFSET {$offset}";
@@ -139,6 +147,7 @@ $employees = $stmt->fetchAll();
 <body class="bg-light py-4">
 
 <div class="container-fluid px-4">
+    <?php include 'header.php'; ?> <!-- 2. ดึง Header มาแสดง -->
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h3 class="mb-0"><i class="bi bi-people text-primary"></i> ข้อมูลบุคลากร (Employee Directory)</h3>
         <div>
@@ -153,12 +162,12 @@ $employees = $stmt->fetchAll();
     <div class="card shadow-sm mb-4">
         <div class="card-body">
             <form method="GET" action="" class="row g-3">
-                <div class="col-md-4">
-                    <label class="form-label fw-bold">ค้นหา (รหัส / ชื่อ-นามสกุล / เลขบัตร)</label>
+                <div class="col-md-3">
+                    <label class="form-label fw-bold">ค้นหา (รหัส / ชื่อ / บัตร)</label>
                     <input type="text" name="search" class="form-control" placeholder="พิมพ์คำค้นหา..." value="<?= htmlspecialchars($search) ?>">
                 </div>
-                <div class="col-md-4">
-                    <label class="form-label">กรองตามแผนก/กลุ่มงาน</label>
+                <div class="col-md-3">
+                    <label class="form-label">แผนก/กลุ่มงาน</label>
                     <select name="department" class="form-select">
                         <option value="">-- แสดงทุกแผนก --</option>
                         <?php foreach ($departments as $d): ?>
@@ -168,8 +177,17 @@ $employees = $stmt->fetchAll();
                         <?php endforeach; ?>
                     </select>
                 </div>
-                <div class="col-md-4 d-flex align-items-end gap-2">
-                    <button type="submit" class="btn btn-primary"><i class="bi bi-search"></i> ค้นหา</button>
+                <div class="col-md-3">
+                    <label class="form-label">รูปแบบการทำงาน</label>
+                    <select name="work_mode" class="form-select">
+                        <option value="">-- ทั้งหมด --</option>
+                        <option value="FIXED" <?= $filterMode === 'FIXED' ? 'selected' : '' ?>>พนักงานประจำ (เวลาปกติ)</option>
+                        <option value="FLEXIBLE" <?= $filterMode === 'FLEXIBLE' ? 'selected' : '' ?>>ยืดหยุ่น / Part-time</option>
+                        <option value="SHIFT" <?= $filterMode === 'SHIFT' ? 'selected' : '' ?>>ตามตารางเวร</option>
+                    </select>
+                </div>
+                <div class="col-md-3 d-flex align-items-end gap-2">
+                    <button type="submit" class="btn btn-primary w-100"><i class="bi bi-search"></i> ค้นหา</button>
                     <a href="employee_list.php" class="btn btn-outline-secondary"><i class="bi bi-arrow-counterclockwise"></i> รีเซ็ต</a>
                 </div>
             </form>
@@ -180,20 +198,20 @@ $employees = $stmt->fetchAll();
     <div class="card shadow-sm">
         <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
             <h5 class="card-title mb-0">รายการบุคลากรทั้งหมด (<?= number_format($totalRecords) ?> คน)</h5>
-            <small class="text-muted"><i class="bi bi-info-circle"></i> คลิกที่แถวเพื่อดู/แก้ไขรายละเอียดและเวลาเข้างาน</small>
+            <small class="text-muted"><i class="bi bi-info-circle"></i> คลิกที่แถวเพื่อดู/แก้ไขรายละเอียด</small>
         </div>
         <div class="card-body p-0">
             <div class="table-responsive">
                 <table class="table table-hover table-striped mb-0 align-middle">
                     <thead class="table-light">
                         <tr>
-                            <th width="70">รูป</th>
+                            <th width="60">รูป</th>
                             <th>รหัสพนักงาน</th>
                             <th>ชื่อ - นามสกุล</th>
                             <th>แผนก / กลุ่มงาน</th>
                             <th>ตำแหน่ง</th>
-                            <th>ประเภท</th>
                             <th>เวลาเข้างาน</th>
+                            <th>รูปแบบงาน</th>
                             <th>สถานะการใช้งาน</th>
                         </tr>
                     </thead>
@@ -211,8 +229,19 @@ $employees = $stmt->fetchAll();
                                     <td class="fw-bold"><?= htmlspecialchars(($emp['first_name'] ?? '') . ' ' . ($emp['last_name'] ?? '')) ?></td>
                                     <td><?= htmlspecialchars($emp['department'] ?? '-') ?></td>
                                     <td><?= htmlspecialchars($emp['position'] ?? '-') ?></td>
-                                    <td><span class="badge bg-secondary"><?= htmlspecialchars($emp['employee_type'] ?? '-') ?></span></td>
                                     <td><span class="badge bg-primary"><?= $startTime ?> น.</span></td>
+                                    <td>
+                                        <?php
+                                        $wm = $emp['work_mode'] ?? 'FIXED';
+                                        if ($wm === 'FLEXIBLE') {
+                                            echo '<span class="badge bg-warning text-dark">ยืดหยุ่น / Part-time</span>';
+                                        } else if ($wm === 'SHIFT') {
+                                            echo '<span class="badge bg-info text-dark">ตามตารางเวร</span>';
+                                        } else {
+                                            echo '<span class="badge bg-secondary">พนักงานประจำ</span>';
+                                        }
+                                        ?>
+                                    </td>
                                     <td>
                                         <?php if (($emp['app_status'] ?? '') === 'เปิดใช้งาน'): ?>
                                             <span class="badge bg-success">เปิดใช้งาน</span>
@@ -297,8 +326,9 @@ $employees = $stmt->fetchAll();
                                 <div class="col-md-4"><strong>ประเภท:</strong> <span id="modalType"></span></div>
                                 <div class="col-md-6"><strong>แผนก/กลุ่มงาน:</strong> <span id="modalDept"></span></div>
                                 <div class="col-md-6"><strong>ตำแหน่ง:</strong> <span id="modalPosText"></span></div>
-                                <div class="col-md-6"><strong class="text-primary">เวลาเข้างานปกติ:</strong> <span id="modalWorkStart" class="fw-bold text-primary"></span> น.</div>
-                                <div class="col-md-6"><strong class="text-primary">เวลาออกงานปกติ:</strong> <span id="modalWorkEnd" class="fw-bold text-primary"></span> น.</div>
+                                <div class="col-md-4"><strong class="text-primary">เวลาเข้างาน:</strong> <span id="modalWorkStart" class="fw-bold text-primary"></span> น.</div>
+                                <div class="col-md-4"><strong class="text-primary">เวลาออกงาน:</strong> <span id="modalWorkEnd" class="fw-bold text-primary"></span> น.</div>
+                                <div class="col-md-4"><strong class="text-primary">รูปแบบงาน:</strong> <span id="modalWorkMode" class="fw-bold"></span></div>
                                 <div class="col-md-4"><strong>เพศ:</strong> <span id="modalGender"></span></div>
                                 <div class="col-md-4"><strong>วันที่จ้าง:</strong> <span id="modalHireDate"></span></div>
                                 <div class="col-md-4"><strong>สถานะการใช้งาน:</strong> <span id="modalStatus"></span></div>
@@ -334,15 +364,21 @@ $employees = $stmt->fetchAll();
                                 <input type="text" name="last_name" id="editLastName" class="form-control">
                             </div>
 
-                            <!-- กำหนดเวลาเข้า-ออกงานรายบุคคล -->
-                            <div class="col-md-6 bg-warning bg-opacity-10 p-2 rounded">
+                            <div class="col-md-4 bg-warning bg-opacity-10 p-2 rounded">
                                 <label class="form-label fw-bold text-dark">เวลาเข้างานปกติ *</label>
                                 <input type="time" name="work_start_time" id="editWorkStart" class="form-control" required>
-                                <small class="text-muted">* เกินเวลานี้ถือว่าสายทันที</small>
                             </div>
-                            <div class="col-md-6 bg-warning bg-opacity-10 p-2 rounded">
+                            <div class="col-md-4 bg-warning bg-opacity-10 p-2 rounded">
                                 <label class="form-label fw-bold text-dark">เวลาออกงานปกติ *</label>
                                 <input type="time" name="work_end_time" id="editWorkEnd" class="form-control" required>
+                            </div>
+                            <div class="col-md-4 bg-warning bg-opacity-10 p-2 rounded">
+                                <label class="form-label fw-bold text-dark">รูปแบบการทำงาน *</label>
+                                <select name="work_mode" id="editWorkMode" class="form-select" required>
+                                    <option value="FIXED">ประจำ (FIXED)</option>
+                                    <option value="FLEXIBLE">ยืดหยุ่น / Part-time</option>
+                                    <option value="SHIFT">ตามตารางเวร (SHIFT)</option>
+                                </select>
                             </div>
 
                             <div class="col-md-6">
@@ -427,6 +463,12 @@ function openEmpDetail(emp) {
     document.getElementById('modalPosText').innerText = emp.position || '-';
     document.getElementById('modalWorkStart').innerText = emp.work_start_time ? emp.work_start_time.substring(0,5) : '08:00';
     document.getElementById('modalWorkEnd').innerText = emp.work_end_time ? emp.work_end_time.substring(0,5) : '16:00';
+    
+    var modeText = 'พนักงานประจำ';
+    if (emp.work_mode === 'FLEXIBLE') modeText = 'ยืดหยุ่น / Part-time';
+    else if (emp.work_mode === 'SHIFT') modeText = 'ตามตารางเวร';
+    document.getElementById('modalWorkMode').innerText = modeText;
+
     document.getElementById('modalGender').innerText = emp.gender || '-';
     document.getElementById('modalHireDate').innerText = emp.hire_date || '-';
     document.getElementById('modalEmail').innerText = emp.email || '-';
@@ -442,6 +484,7 @@ function openEmpDetail(emp) {
     document.getElementById('editLastName').value = emp.last_name || '';
     document.getElementById('editWorkStart').value = emp.work_start_time || '08:00:00';
     document.getElementById('editWorkEnd').value = emp.work_end_time || '16:00:00';
+    document.getElementById('editWorkMode').value = emp.work_mode || 'FIXED';
     document.getElementById('editCardNumber').value = emp.card_number || '';
     document.getElementById('editEmployeeType').value = emp.employee_type || 'ประจำ';
     document.getElementById('editDepartment').value = emp.department || '';
